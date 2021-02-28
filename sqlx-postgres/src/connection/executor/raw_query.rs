@@ -1,8 +1,9 @@
-use sqlx_core::{Execute, Result, Runtime};
+use sqlx_core::{placeholders, Execute, Result, Runtime};
 
 use crate::protocol::frontend::{self, Bind, PortalRef, Query, StatementRef, Sync};
 use crate::raw_statement::RawStatement;
 use crate::{PgArguments, PgConnection, Postgres};
+use std::borrow::Cow;
 
 impl<Rt: Runtime> PgConnection<Rt> {
     fn write_raw_query_statement(

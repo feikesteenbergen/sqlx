@@ -4,8 +4,6 @@ use std::time::Instant;
 
 use futures_core::future::BoxFuture;
 
-const SQLX_MIGRATION_SCHEMA: &str = "public";
-
 pub(crate) use sqlx_core::migrate::MigrateError;
 pub(crate) use sqlx_core::migrate::{AppliedMigration, Migration};
 pub(crate) use sqlx_core::migrate::{Migrate, MigrateDatabase};
@@ -102,7 +100,7 @@ impl Migrate for PgConnection {
                 execution_time BIGINT NOT NULL
             );
                             "#,
-                quote_ident(SQLX_MIGRATION_SCHEMA)
+                quote_ident(self.get_migrate_schema())
             ))
             .await?;
 
@@ -113,7 +111,7 @@ impl Migrate for PgConnection {
     fn dirty_version(&mut self) -> BoxFuture<'_, Result<Option<i64>, MigrateError>> {
         Box::pin(async move {
             // language=SQL
-            let row: Option<(i64,)> = query_as(&format!("SELECT version FROM {0}._sqlx_migrations WHERE success = false ORDER BY version LIMIT 1", quote_ident(SQLX_MIGRATION_SCHEMA)))
+            let row: Option<(i64,)> = query_as(&format!("SELECT version FROM {0}._sqlx_migrations WHERE success = false ORDER BY version LIMIT 1", quote_ident(self.get_migrate_schema())))
                 .fetch_optional(self).await?;
 
             Ok(row.map(|r| r.0))
@@ -127,8 +125,10 @@ impl Migrate for PgConnection {
             // language=SQL
             let rows: Vec<(i64, Vec<u8>)> = query_as(&format!(
                 "SELECT version, checksum FROM {0}._sqlx_migrations ORDER BY version",
-                quote_ident(SQLX_MIGRATION_SCHEMA)
-            )).fetch_all(self).await?;
+                quote_ident(&self.get_migrate_schema())
+            ))
+            .fetch_all(self)
+            .await?;
 
             let migrations = rows
                 .into_iter()
@@ -183,6 +183,14 @@ impl Migrate for PgConnection {
         migration: &'m Migration,
     ) -> BoxFuture<'m, Result<Duration, MigrateError>> {
         Box::pin(async move {
+            let sql = format!(
+                r#"
+    INSERT INTO {0}._sqlx_migrations ( version, description, success, checksum, execution_time )
+    VALUES ( $1, $2, TRUE, $3, -1 )
+                "#,
+                self.get_migrate_schema()
+            );
+
             let mut tx = self.begin().await?;
             let start = Instant::now();
 
@@ -194,13 +202,7 @@ impl Migrate for PgConnection {
             let _ = tx.execute(&*migration.sql).await?;
 
             // language=SQL
-            let _ = query(&format!(
-                r#"
-    INSERT INTO {0}._sqlx_migrations ( version, description, success, checksum, execution_time )
-    VALUES ( $1, $2, TRUE, $3, -1 )
-                "#,
-                quote_ident(SQLX_MIGRATION_SCHEMA),
-            ))
+            let _ = query(&sql)
                 .bind(migration.version)
                 .bind(&*migration.description)
                 .bind(&*migration.checksum)
@@ -222,12 +224,12 @@ impl Migrate for PgConnection {
     SET execution_time = $1
     WHERE version = $2
                 "#,
-                quote_ident(SQLX_MIGRATION_SCHEMA)
+                quote_ident(self.get_migrate_schema())
             ))
-                .bind(elapsed.as_nanos() as i64)
-                .bind(migration.version)
-                .execute(self)
-                .await?;
+            .bind(elapsed.as_nanos() as i64)
+            .bind(migration.version)
+            .execute(self)
+            .await?;
 
             Ok(elapsed)
         })
@@ -238,6 +240,10 @@ impl Migrate for PgConnection {
         migration: &'m Migration,
     ) -> BoxFuture<'m, Result<Duration, MigrateError>> {
         Box::pin(async move {
+            let sql = format!(
+                r#"DELETE FROM {0}._sqlx_migrations WHERE version = $1"#,
+                quote_ident(self.get_migrate_schema())
+            );
             // Use a single transaction for the actual migration script and the essential bookeeping so we never
             // execute migrations twice. See https://github.com/launchbadge/sqlx/issues/1966.
             let mut tx = self.begin().await?;
@@ -245,11 +251,7 @@ impl Migrate for PgConnection {
 
             let _ = tx.execute(&*migration.sql).await?;
 
-            // language=SQL
-            let _ = query(&format!(
-                r#"DELETE FROM {0}._sqlx_migrations WHERE version = $1"#,
-                quote_ident(SQLX_MIGRATION_SCHEMA)
-            ))
+            let _ = query(&sql)
                 .bind(migration.version)
                 .execute(&mut *tx)
                 .await?;

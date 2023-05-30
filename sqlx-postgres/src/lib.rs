@@ -12,6 +12,7 @@ mod connection;
 mod copy;
 mod database;
 mod error;
+mod format;
 mod io;
 mod listener;
 mod message;

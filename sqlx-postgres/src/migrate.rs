@@ -11,6 +11,7 @@ pub(crate) use sqlx_core::migrate::{Migrate, MigrateDatabase};
 use crate::connection::{ConnectOptions, Connection};
 use crate::error::Error;
 use crate::executor::Executor;
+use crate::format::quote_ident;
 use crate::query::query;
 use crate::query_as::query_as;
 use crate::query_scalar::query_scalar;
@@ -45,10 +46,7 @@ impl MigrateDatabase for Postgres {
             let mut conn = options.connect().await?;
 
             let _ = conn
-                .execute(&*format!(
-                    "CREATE DATABASE \"{}\"",
-                    database.replace('"', "\"\"")
-                ))
+                .execute(&*format!("CREATE DATABASE {}", quote_ident(&database)))
                 .await?;
 
             Ok(())
@@ -77,8 +75,8 @@ impl MigrateDatabase for Postgres {
 
             let _ = conn
                 .execute(&*format!(
-                    "DROP DATABASE IF EXISTS \"{}\"",
-                    database.replace('"', "\"\"")
+                    "DROP DATABASE IF EXISTS {}",
+                    quote_ident(&database)
                 ))
                 .await?;
 
@@ -91,18 +89,19 @@ impl Migrate for PgConnection {
     fn ensure_migrations_table(&mut self) -> BoxFuture<'_, Result<(), MigrateError>> {
         Box::pin(async move {
             // language=SQL
-            self.execute(
+            self.execute(&*format!(
                 r#"
-CREATE TABLE IF NOT EXISTS _sqlx_migrations (
-    version BIGINT PRIMARY KEY,
-    description TEXT NOT NULL,
-    installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
-    success BOOLEAN NOT NULL,
-    checksum BYTEA NOT NULL,
-    execution_time BIGINT NOT NULL
-);
-                "#,
-            )
+            CREATE TABLE IF NOT EXISTS {0}._sqlx_migrations (
+                version BIGINT PRIMARY KEY,
+                description TEXT NOT NULL,
+                installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+                success BOOLEAN NOT NULL,
+                checksum BYTEA NOT NULL,
+                execution_time BIGINT NOT NULL
+            );
+                            "#,
+                quote_ident(self.get_migrate_schema())
+            ))
             .await?;
 
             Ok(())
@@ -112,11 +111,8 @@ CREATE TABLE IF NOT EXISTS _sqlx_migrations (
     fn dirty_version(&mut self) -> BoxFuture<'_, Result<Option<i64>, MigrateError>> {
         Box::pin(async move {
             // language=SQL
-            let row: Option<(i64,)> = query_as(
-                "SELECT version FROM _sqlx_migrations WHERE success = false ORDER BY version LIMIT 1",
-            )
-            .fetch_optional(self)
-            .await?;
+            let row: Option<(i64,)> = query_as(&format!("SELECT version FROM {0}._sqlx_migrations WHERE success = false ORDER BY version LIMIT 1", quote_ident(self.get_migrate_schema())))
+                .fetch_optional(self).await?;
 
             Ok(row.map(|r| r.0))
         })
@@ -127,10 +123,12 @@ CREATE TABLE IF NOT EXISTS _sqlx_migrations (
     ) -> BoxFuture<'_, Result<Vec<AppliedMigration>, MigrateError>> {
         Box::pin(async move {
             // language=SQL
-            let rows: Vec<(i64, Vec<u8>)> =
-                query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
-                    .fetch_all(self)
-                    .await?;
+            let rows: Vec<(i64, Vec<u8>)> = query_as(&format!(
+                "SELECT version, checksum FROM {0}._sqlx_migrations ORDER BY version",
+                quote_ident(&self.get_migrate_schema())
+            ))
+            .fetch_all(self)
+            .await?;
 
             let migrations = rows
                 .into_iter()
@@ -185,6 +183,14 @@ CREATE TABLE IF NOT EXISTS _sqlx_migrations (
         migration: &'m Migration,
     ) -> BoxFuture<'m, Result<Duration, MigrateError>> {
         Box::pin(async move {
+            let sql = format!(
+                r#"
+    INSERT INTO {0}._sqlx_migrations ( version, description, success, checksum, execution_time )
+    VALUES ( $1, $2, TRUE, $3, -1 )
+                "#,
+                self.get_migrate_schema()
+            );
+
             let mut tx = self.begin().await?;
             let start = Instant::now();
 
@@ -196,17 +202,12 @@ CREATE TABLE IF NOT EXISTS _sqlx_migrations (
             let _ = tx.execute(&*migration.sql).await?;
 
             // language=SQL
-            let _ = query(
-                r#"
-    INSERT INTO _sqlx_migrations ( version, description, success, checksum, execution_time )
-    VALUES ( $1, $2, TRUE, $3, -1 )
-                "#,
-            )
-            .bind(migration.version)
-            .bind(&*migration.description)
-            .bind(&*migration.checksum)
-            .execute(&mut *tx)
-            .await?;
+            let _ = query(&sql)
+                .bind(migration.version)
+                .bind(&*migration.description)
+                .bind(&*migration.checksum)
+                .execute(&mut *tx)
+                .await?;
 
             tx.commit().await?;
 
@@ -217,13 +218,14 @@ CREATE TABLE IF NOT EXISTS _sqlx_migrations (
             let elapsed = start.elapsed();
 
             // language=SQL
-            let _ = query(
+            let _ = query(&format!(
                 r#"
-    UPDATE _sqlx_migrations
+    UPDATE {0}._sqlx_migrations
     SET execution_time = $1
     WHERE version = $2
                 "#,
-            )
+                quote_ident(self.get_migrate_schema())
+            ))
             .bind(elapsed.as_nanos() as i64)
             .bind(migration.version)
             .execute(self)
@@ -238,6 +240,10 @@ CREATE TABLE IF NOT EXISTS _sqlx_migrations (
         migration: &'m Migration,
     ) -> BoxFuture<'m, Result<Duration, MigrateError>> {
         Box::pin(async move {
+            let sql = format!(
+                r#"DELETE FROM {0}._sqlx_migrations WHERE version = $1"#,
+                quote_ident(self.get_migrate_schema())
+            );
             // Use a single transaction for the actual migration script and the essential bookeeping so we never
             // execute migrations twice. See https://github.com/launchbadge/sqlx/issues/1966.
             let mut tx = self.begin().await?;
@@ -245,8 +251,7 @@ CREATE TABLE IF NOT EXISTS _sqlx_migrations (
 
             let _ = tx.execute(&*migration.sql).await?;
 
-            // language=SQL
-            let _ = query(r#"DELETE FROM _sqlx_migrations WHERE version = $1"#)
+            let _ = query(&sql)
                 .bind(migration.version)
                 .execute(&mut *tx)
                 .await?;

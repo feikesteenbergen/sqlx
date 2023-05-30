@@ -64,6 +64,9 @@ pub struct PgConnection {
     pub(crate) transaction_depth: usize,
 
     log_settings: LogSettings,
+
+    // schema that contains the migration table
+    migrate_schema: Option<String>,
 }
 
 impl PgConnection {
@@ -106,6 +109,10 @@ impl PgConnection {
         self.transaction_status = ReadyForQuery::decode(message.contents)?.transaction_status;
 
         Ok(())
+    }
+
+    pub(crate) fn get_migrate_schema(&self) -> &str {
+        self.migrate_schema.as_deref().unwrap_or("public")
     }
 
     /// Queue a simple query (not prepared) to execute the next time this connection is used.

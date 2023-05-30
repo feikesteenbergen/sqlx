@@ -72,7 +72,7 @@ async fn clean_up(conn: &mut PgConnection) -> anyhow::Result<()> {
     conn.execute("DROP TABLE migrations_reversible_test")
         .await
         .ok();
-    conn.execute("DROP TABLE _sqlx_migrations").await.ok();
+    conn.execute(r#"DROP TABLE "public"._sqlx_migrations"#).await.ok();
 
     Ok(())
 }

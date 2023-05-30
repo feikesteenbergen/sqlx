@@ -48,10 +48,7 @@ impl MigrateDatabase for Postgres {
             let mut conn = options.connect().await?;
 
             let _ = conn
-                .execute(&*format!(
-                    "CREATE DATABASE \"{}\"",
-                    database.replace('"', "\"\"")
-                ))
+                .execute(&*format!("CREATE DATABASE {}", quote_ident(&database)))
                 .await?;
 
             Ok(())
@@ -80,8 +77,8 @@ impl MigrateDatabase for Postgres {
 
             let _ = conn
                 .execute(&*format!(
-                    "DROP DATABASE IF EXISTS \"{}\"",
-                    database.replace('"', "\"\"")
+                    "DROP DATABASE IF EXISTS {}",
+                    quote_ident(&database)
                 ))
                 .await?;
 
@@ -94,7 +91,7 @@ impl Migrate for PgConnection {
     fn ensure_migrations_table(&mut self) -> BoxFuture<'_, Result<(), MigrateError>> {
         Box::pin(async move {
             // language=SQL
-            let sql = &format!(
+            self.execute(&*format!(
                 r#"
             CREATE TABLE IF NOT EXISTS {0}._sqlx_migrations (
                 version BIGINT PRIMARY KEY,
@@ -106,8 +103,8 @@ impl Migrate for PgConnection {
             );
                             "#,
                 quote_ident(SQLX_MIGRATION_SCHEMA)
-            );
-            self.execute(sql.as_str()).await?;
+            ))
+            .await?;
 
             Ok(())
         })
@@ -116,8 +113,8 @@ impl Migrate for PgConnection {
     fn dirty_version(&mut self) -> BoxFuture<'_, Result<Option<i64>, MigrateError>> {
         Box::pin(async move {
             // language=SQL
-            let sql = format!("SELECT version FROM {0}._sqlx_migrations WHERE success = false ORDER BY version LIMIT 1", quote_ident(SQLX_MIGRATION_SCHEMA));
-            let row: Option<(i64,)> = query_as(sql.as_str()).fetch_optional(self).await?;
+            let row: Option<(i64,)> = query_as(&format!("SELECT version FROM {0}._sqlx_migrations WHERE success = false ORDER BY version LIMIT 1", quote_ident(SQLX_MIGRATION_SCHEMA)))
+                .fetch_optional(self).await?;
 
             Ok(row.map(|r| r.0))
         })
@@ -128,11 +125,10 @@ impl Migrate for PgConnection {
     ) -> BoxFuture<'_, Result<Vec<AppliedMigration>, MigrateError>> {
         Box::pin(async move {
             // language=SQL
-            let sql = format!(
+            let rows: Vec<(i64, Vec<u8>)> = query_as(&format!(
                 "SELECT version, checksum FROM {0}._sqlx_migrations ORDER BY version",
                 quote_ident(SQLX_MIGRATION_SCHEMA)
-            );
-            let rows: Vec<(i64, Vec<u8>)> = query_as(sql.as_str()).fetch_all(self).await?;
+            )).fetch_all(self).await?;
 
             let migrations = rows
                 .into_iter()
@@ -198,14 +194,13 @@ impl Migrate for PgConnection {
             let _ = tx.execute(&*migration.sql).await?;
 
             // language=SQL
-            let sql = format!(
+            let _ = query(&format!(
                 r#"
     INSERT INTO {0}._sqlx_migrations ( version, description, success, checksum, execution_time )
     VALUES ( $1, $2, TRUE, $3, -1 )
                 "#,
                 quote_ident(SQLX_MIGRATION_SCHEMA),
-            );
-            let _ = query(sql.as_str())
+            ))
                 .bind(migration.version)
                 .bind(&*migration.description)
                 .bind(&*migration.checksum)
@@ -221,15 +216,14 @@ impl Migrate for PgConnection {
             let elapsed = start.elapsed();
 
             // language=SQL
-            let sql = format!(
+            let _ = query(&format!(
                 r#"
     UPDATE {0}._sqlx_migrations
     SET execution_time = $1
     WHERE version = $2
                 "#,
                 quote_ident(SQLX_MIGRATION_SCHEMA)
-            );
-            let _ = query(sql.as_str())
+            ))
                 .bind(elapsed.as_nanos() as i64)
                 .bind(migration.version)
                 .execute(self)
@@ -252,11 +246,10 @@ impl Migrate for PgConnection {
             let _ = tx.execute(&*migration.sql).await?;
 
             // language=SQL
-            let sql = format!(
+            let _ = query(&format!(
                 r#"DELETE FROM {0}._sqlx_migrations WHERE version = $1"#,
                 quote_ident(SQLX_MIGRATION_SCHEMA)
-            );
-            let _ = query(sql.as_str())
+            ))
                 .bind(migration.version)
                 .execute(&mut *tx)
                 .await?;

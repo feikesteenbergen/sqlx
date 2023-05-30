@@ -4,6 +4,8 @@ use std::time::Instant;
 
 use futures_core::future::BoxFuture;
 
+const SQLX_MIGRATION_SCHEMA: &str = "public";
+
 pub(crate) use sqlx_core::migrate::MigrateError;
 pub(crate) use sqlx_core::migrate::{AppliedMigration, Migration};
 pub(crate) use sqlx_core::migrate::{Migrate, MigrateDatabase};
@@ -11,6 +13,7 @@ pub(crate) use sqlx_core::migrate::{Migrate, MigrateDatabase};
 use crate::connection::{ConnectOptions, Connection};
 use crate::error::Error;
 use crate::executor::Executor;
+use crate::format::quote_ident;
 use crate::query::query;
 use crate::query_as::query_as;
 use crate::query_scalar::query_scalar;
@@ -91,19 +94,20 @@ impl Migrate for PgConnection {
     fn ensure_migrations_table(&mut self) -> BoxFuture<'_, Result<(), MigrateError>> {
         Box::pin(async move {
             // language=SQL
-            self.execute(
+            let sql = &format!(
                 r#"
-CREATE TABLE IF NOT EXISTS public._sqlx_migrations (
-    version BIGINT PRIMARY KEY,
-    description TEXT NOT NULL,
-    installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
-    success BOOLEAN NOT NULL,
-    checksum BYTEA NOT NULL,
-    execution_time BIGINT NOT NULL
-);
-                "#,
-            )
-            .await?;
+            CREATE TABLE IF NOT EXISTS {0}._sqlx_migrations (
+                version BIGINT PRIMARY KEY,
+                description TEXT NOT NULL,
+                installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+                success BOOLEAN NOT NULL,
+                checksum BYTEA NOT NULL,
+                execution_time BIGINT NOT NULL
+            );
+                            "#,
+                quote_ident(SQLX_MIGRATION_SCHEMA)
+            );
+            self.execute(sql.as_str()).await?;
 
             Ok(())
         })
@@ -112,11 +116,8 @@ CREATE TABLE IF NOT EXISTS public._sqlx_migrations (
     fn dirty_version(&mut self) -> BoxFuture<'_, Result<Option<i64>, MigrateError>> {
         Box::pin(async move {
             // language=SQL
-            let row: Option<(i64,)> = query_as(
-                "SELECT version FROM public._sqlx_migrations WHERE success = false ORDER BY version LIMIT 1",
-            )
-            .fetch_optional(self)
-            .await?;
+            let sql = format!("SELECT version FROM {0}._sqlx_migrations WHERE success = false ORDER BY version LIMIT 1", quote_ident(SQLX_MIGRATION_SCHEMA));
+            let row: Option<(i64,)> = query_as(sql.as_str()).fetch_optional(self).await?;
 
             Ok(row.map(|r| r.0))
         })
@@ -127,10 +128,11 @@ CREATE TABLE IF NOT EXISTS public._sqlx_migrations (
     ) -> BoxFuture<'_, Result<Vec<AppliedMigration>, MigrateError>> {
         Box::pin(async move {
             // language=SQL
-            let rows: Vec<(i64, Vec<u8>)> =
-                query_as("SELECT version, checksum FROM public._sqlx_migrations ORDER BY version")
-                    .fetch_all(self)
-                    .await?;
+            let sql = format!(
+                "SELECT version, checksum FROM {0}._sqlx_migrations ORDER BY version",
+                quote_ident(SQLX_MIGRATION_SCHEMA)
+            );
+            let rows: Vec<(i64, Vec<u8>)> = query_as(sql.as_str()).fetch_all(self).await?;
 
             let migrations = rows
                 .into_iter()
@@ -196,17 +198,19 @@ CREATE TABLE IF NOT EXISTS public._sqlx_migrations (
             let _ = tx.execute(&*migration.sql).await?;
 
             // language=SQL
-            let _ = query(
+            let sql = format!(
                 r#"
-    INSERT INTO public._sqlx_migrations ( version, description, success, checksum, execution_time )
+    INSERT INTO {0}._sqlx_migrations ( version, description, success, checksum, execution_time )
     VALUES ( $1, $2, TRUE, $3, -1 )
                 "#,
-            )
-            .bind(migration.version)
-            .bind(&*migration.description)
-            .bind(&*migration.checksum)
-            .execute(&mut *tx)
-            .await?;
+                quote_ident(SQLX_MIGRATION_SCHEMA),
+            );
+            let _ = query(sql.as_str())
+                .bind(migration.version)
+                .bind(&*migration.description)
+                .bind(&*migration.checksum)
+                .execute(&mut *tx)
+                .await?;
 
             tx.commit().await?;
 
@@ -217,17 +221,19 @@ CREATE TABLE IF NOT EXISTS public._sqlx_migrations (
             let elapsed = start.elapsed();
 
             // language=SQL
-            let _ = query(
+            let sql = format!(
                 r#"
-    UPDATE public._sqlx_migrations
+    UPDATE {0}._sqlx_migrations
     SET execution_time = $1
     WHERE version = $2
                 "#,
-            )
-            .bind(elapsed.as_nanos() as i64)
-            .bind(migration.version)
-            .execute(self)
-            .await?;
+                quote_ident(SQLX_MIGRATION_SCHEMA)
+            );
+            let _ = query(sql.as_str())
+                .bind(elapsed.as_nanos() as i64)
+                .bind(migration.version)
+                .execute(self)
+                .await?;
 
             Ok(elapsed)
         })
@@ -246,7 +252,11 @@ CREATE TABLE IF NOT EXISTS public._sqlx_migrations (
             let _ = tx.execute(&*migration.sql).await?;
 
             // language=SQL
-            let _ = query(r#"DELETE FROM public._sqlx_migrations WHERE version = $1"#)
+            let sql = format!(
+                r#"DELETE FROM {0}._sqlx_migrations WHERE version = $1"#,
+                quote_ident(SQLX_MIGRATION_SCHEMA)
+            );
+            let _ = query(sql.as_str())
                 .bind(migration.version)
                 .execute(&mut *tx)
                 .await?;

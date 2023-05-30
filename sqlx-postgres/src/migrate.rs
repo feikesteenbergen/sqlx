@@ -93,7 +93,7 @@ impl Migrate for PgConnection {
             // language=SQL
             self.execute(
                 r#"
-CREATE TABLE IF NOT EXISTS _sqlx_migrations (
+CREATE TABLE IF NOT EXISTS public._sqlx_migrations (
     version BIGINT PRIMARY KEY,
     description TEXT NOT NULL,
     installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -113,7 +113,7 @@ CREATE TABLE IF NOT EXISTS _sqlx_migrations (
         Box::pin(async move {
             // language=SQL
             let row: Option<(i64,)> = query_as(
-                "SELECT version FROM _sqlx_migrations WHERE success = false ORDER BY version LIMIT 1",
+                "SELECT version FROM public._sqlx_migrations WHERE success = false ORDER BY version LIMIT 1",
             )
             .fetch_optional(self)
             .await?;
@@ -128,7 +128,7 @@ CREATE TABLE IF NOT EXISTS _sqlx_migrations (
         Box::pin(async move {
             // language=SQL
             let rows: Vec<(i64, Vec<u8>)> =
-                query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                query_as("SELECT version, checksum FROM public._sqlx_migrations ORDER BY version")
                     .fetch_all(self)
                     .await?;
 
@@ -198,7 +198,7 @@ CREATE TABLE IF NOT EXISTS _sqlx_migrations (
             // language=SQL
             let _ = query(
                 r#"
-    INSERT INTO _sqlx_migrations ( version, description, success, checksum, execution_time )
+    INSERT INTO public._sqlx_migrations ( version, description, success, checksum, execution_time )
     VALUES ( $1, $2, TRUE, $3, -1 )
                 "#,
             )
@@ -219,7 +219,7 @@ CREATE TABLE IF NOT EXISTS _sqlx_migrations (
             // language=SQL
             let _ = query(
                 r#"
-    UPDATE _sqlx_migrations
+    UPDATE public._sqlx_migrations
     SET execution_time = $1
     WHERE version = $2
                 "#,
@@ -246,7 +246,7 @@ CREATE TABLE IF NOT EXISTS _sqlx_migrations (
             let _ = tx.execute(&*migration.sql).await?;
 
             // language=SQL
-            let _ = query(r#"DELETE FROM _sqlx_migrations WHERE version = $1"#)
+            let _ = query(r#"DELETE FROM public._sqlx_migrations WHERE version = $1"#)
                 .bind(migration.version)
                 .execute(&mut *tx)
                 .await?;

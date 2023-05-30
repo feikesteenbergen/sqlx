@@ -11,6 +11,7 @@ use sqlx_core::Either;
 use crate::describe::Describe;
 use crate::error::Error;
 use crate::executor::{Execute, Executor};
+use crate::format::quote_ident;
 use crate::message::{MessageFormat, Notification};
 use crate::pool::PoolOptions;
 use crate::pool::{Pool, PoolConnection};
@@ -98,7 +99,7 @@ impl PgListener {
     pub async fn listen(&mut self, channel: &str) -> Result<(), Error> {
         self.connection()
             .await?
-            .execute(&*format!(r#"LISTEN "{}""#, ident(channel)))
+            .execute(&*format!("LISTEN {}", ident(channel)))
             .await?;
 
         self.channels.push(channel.to_owned());
@@ -127,7 +128,7 @@ impl PgListener {
         // UNLISTEN (we've disconnected anyways)
         if let Some(connection) = self.connection.as_mut() {
             connection
-                .execute(&*format!(r#"UNLISTEN "{}""#, ident(channel)))
+                .execute(&*format!("UNLISTEN {}", ident(channel)))
                 .await?;
         }
 
@@ -424,22 +425,23 @@ impl Debug for PgNotification {
     }
 }
 
-fn ident(mut name: &str) -> String {
+/// Returns a properly quoted identifier for the provided name, including
+/// the surrounding double quotes.
+fn ident(name: &str) -> String {
     // If the input string contains a NUL byte, we should truncate the
     // identifier.
     if let Some(index) = name.find('\0') {
-        name = &name[..index];
+        quote_ident(&name[..index])
+    } else {
+        quote_ident(&name)
     }
-
-    // Any double quotes must be escaped
-    name.replace('"', "\"\"")
 }
 
 fn build_listen_all_query(channels: impl IntoIterator<Item = impl AsRef<str>>) -> String {
     channels.into_iter().fold(String::new(), |mut acc, chan| {
-        acc.push_str(r#"LISTEN ""#);
+        acc.push_str("LISTEN ");
         acc.push_str(&ident(chan.as_ref()));
-        acc.push_str(r#"";"#);
+        acc.push(';');
         acc
     })
 }

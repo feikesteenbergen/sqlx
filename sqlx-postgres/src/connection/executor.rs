@@ -28,9 +28,9 @@ async fn prepare(
     persistent: bool,
     resolve_column_origin: bool,
 ) -> Result<(StatementId, Arc<PgStatementMetadata>), Error> {
-    // if cache is disabled, persistent statements get an id but are never evicted
-    // which causes a memory leak
-    let id = if persistent && conn.inner.cache_statement.is_enabled() {
+    // Persistent statements get a name. With the cache on, eviction closes them. With the cache off
+    // the name is closed together with the next Parse (see `pending_close`).
+    let id = if persistent {
         let id = conn.inner.next_statement_id;
         conn.inner.next_statement_id = id.next();
         id
@@ -45,6 +45,12 @@ async fn prepare(
 
     // flush and wait until we are re-ready
     conn.wait_until_ready().await?;
+
+    // the statement of the previous query, if the cache is off, goes in the same flush as this Parse
+    let closing = conn.inner.pending_close.take();
+    if let Some(old) = closing {
+        conn.inner.stream.write_msg(Close::Statement(old))?;
+    }
 
     // next we send the PARSE command to the server
     conn.inner.stream.write_msg(Parse {
@@ -64,8 +70,16 @@ async fn prepare(
     conn.write_sync();
     conn.inner.stream.flush().await?;
 
+    if closing.is_some() {
+        conn.wait_for_close_complete(1).await?;
+    }
+
     // indicates that the SQL query string is now successfully parsed and has semantic validity
     conn.inner.stream.recv_expect::<ParseComplete>().await?;
+
+    if persistent && !conn.inner.cache_statement.is_enabled() {
+        conn.inner.pending_close = Some(id);
+    }
 
     let (metadata, ran_catalog_query) = if let Some(metadata) = metadata {
         // each SYNC produces one READY FOR QUERY
@@ -517,8 +531,9 @@ impl<'c> Executor<'c> for &'c mut PgConnection {
         Box::pin(async move {
             self.wait_until_ready().await?;
 
+            let persistent = self.inner.cache_statement.is_enabled();
             let (_, metadata) = self
-                .get_or_prepare(sql.as_str(), parameters, true, None, true)
+                .get_or_prepare(sql.as_str(), parameters, persistent, None, true)
                 .await?;
 
             Ok(PgStatement { sql, metadata })
@@ -536,8 +551,9 @@ impl<'c> Executor<'c> for &'c mut PgConnection {
         Box::pin(async move {
             self.wait_until_ready().await?;
 
+            let persistent = self.inner.cache_statement.is_enabled();
             let (stmt_id, metadata) = self
-                .get_or_prepare(sql.as_str(), &[], true, None, true)
+                .get_or_prepare(sql.as_str(), &[], persistent, None, true)
                 .await?;
 
             let nullable = self.get_nullable_for_columns(stmt_id, &metadata).await?;

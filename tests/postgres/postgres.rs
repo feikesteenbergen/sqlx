@@ -871,6 +871,69 @@ async fn it_closes_statements_when_caching_is_disabled_issue_4328() -> anyhow::R
     Ok(())
 }
 
+// Poolers in transaction mode (pgbouncer with `max_prepared_statements`) can only follow *named*
+// statements across the Parse/Describe and Bind/Execute round trips, so a persistent query must not
+// fall back to the unnamed statement when the cache is off.
+#[sqlx_macros::test]
+async fn it_uses_a_named_statement_when_caching_is_disabled() -> anyhow::Result<()> {
+    sqlx_test::setup_if_needed();
+
+    let mut options: PgConnectOptions = env::var("DATABASE_URL")?.parse().unwrap();
+    options = options.statement_cache_capacity(0);
+
+    let mut conn = PgConnection::connect_with(&options).await?;
+
+    for i in 0..5_i32 {
+        let row = sqlx::query("SELECT $1::int4 AS val")
+            .bind(i)
+            .fetch_one(&mut conn)
+            .await?;
+        assert_eq!(i, row.get::<i32, _>("val"));
+
+        // A simple query sends no Parse, so the statement of the query above is still there.
+        let names: Vec<String> = sqlx::raw_sql("SELECT name FROM pg_prepared_statements")
+            .fetch_all(&mut conn)
+            .await?
+            .iter()
+            .map(|row| row.get("name"))
+            .collect();
+
+        assert_eq!(1, names.len(), "one named statement, not more: {names:?}");
+        assert!(names[0].starts_with("sqlx_s_"), "{names:?}");
+    }
+
+    Ok(())
+}
+
+#[sqlx_macros::test]
+async fn it_closes_statements_of_failed_queries_when_caching_is_disabled() -> anyhow::Result<()> {
+    sqlx_test::setup_if_needed();
+
+    let mut options: PgConnectOptions = env::var("DATABASE_URL")?.parse().unwrap();
+    options = options.statement_cache_capacity(0);
+
+    let mut conn = PgConnection::connect_with(&options).await?;
+
+    for i in 0..5_i32 {
+        // An error skips the rest of the batch, so the statement cannot be closed in the same batch.
+        let result = sqlx::query("SELECT 1 / ($1::int4 - $1::int4)")
+            .bind(i)
+            .fetch_one(&mut conn)
+            .await;
+        assert!(result.is_err());
+    }
+
+    let row = sqlx::query("SELECT count(*) AS num_prepared_statements FROM pg_prepared_statements")
+        .persistent(false)
+        .fetch_one(&mut conn)
+        .await?;
+
+    let n: i64 = row.get("num_prepared_statements");
+    assert_eq!(0, n, "no prepared statements should be open");
+
+    Ok(())
+}
+
 #[sqlx_macros::test]
 async fn it_sets_application_name() -> anyhow::Result<()> {
     sqlx_test::setup_if_needed();

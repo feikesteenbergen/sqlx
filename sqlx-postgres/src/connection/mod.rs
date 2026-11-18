@@ -59,6 +59,9 @@ pub struct PgConnectionInner {
     // in PostgreSQL, the statement is prepared to a user-supplied identifier
     next_statement_id: StatementId,
 
+    // with the statement cache off: the named statement of the last query, closed with the next Parse
+    pending_close: Option<StatementId>,
+
     // cache statement by query string to the id and columns
     cache_statement: StatementCache<(StatementId, Arc<PgStatementMetadata>)>,
 
